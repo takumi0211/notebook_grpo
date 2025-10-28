@@ -3,5 +3,5 @@ git reset --hard origin/main
 git clean -fd
 
 git add -A
-git commit -m "upload first"
+git commit -m "complete environment"
 git push origin main
