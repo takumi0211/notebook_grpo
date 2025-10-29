@@ -61,7 +61,7 @@ def _set_seed(seed: int) -> None:
 
 
 class StepStream(IterableDataset):
-    """Yield prompts with reward tensors, sampled per trainer step."""
+    """Yield prompts with reward tensors, duplicating each prompt per generation."""
 
     KEEP_KEYS = {
         "prompt",
@@ -71,10 +71,11 @@ class StepStream(IterableDataset):
         "reward_action_3",
     }
 
-    def __init__(self, base_dataset, prompts_per_step: int) -> None:
+    def __init__(self, base_dataset, prompts_per_step: int, num_generations: int) -> None:
         super().__init__()
         self.base = base_dataset
         self.prompts_per_step = prompts_per_step
+        self.num_generations = num_generations
         self.n = len(base_dataset)
         self.keys = [key for key in self.KEEP_KEYS if key in getattr(base_dataset, "features", {})]
 
@@ -90,15 +91,20 @@ class StepStream(IterableDataset):
                         sample[key] = value
                     else:
                         sample[key] = torch.atleast_1d(torch.tensor(value, dtype=torch.float32))
-                yield sample
+                for _ in range(self.num_generations):
+                    yield {
+                        key: (value.clone() if isinstance(value, torch.Tensor) else value)
+                        for key, value in sample.items()
+                    }
 
 
 def create_step_stream(
     prompts_per_step: int = PROMPTS_PER_STEP,
+    num_generations: int = NUM_GENERATIONS,
     dataset=None,
 ) -> StepStream:
     base = dataset if dataset is not None else load_prompt_dataset()
-    return StepStream(base, prompts_per_step)
+    return StepStream(base, prompts_per_step, num_generations)
 
 
 def build_model_and_tokenizer(
@@ -159,6 +165,7 @@ def build_trainer(
         model.config.use_cache = False
     stream = create_step_stream(
         prompts_per_step=prompts_per_step,
+        num_generations=num_generations,
         dataset=dataset,
     )
     logger.info(
@@ -169,9 +176,8 @@ def build_trainer(
         stream.keys,
     )
 
-    train_batch_size = prompts_per_step
-    generation_batch_size = num_generations
-    completions_per_micro_step = prompts_per_step * num_generations
+    train_batch_size = num_generations
+    completions_per_micro_step = train_batch_size
     total_completions_per_update = completions_per_micro_step * GRADIENT_ACCUMULATION_STEPS
 
     args = GRPOConfig(
@@ -182,7 +188,7 @@ def build_trainer(
         gradient_checkpointing=True,
         seed=seed,
         num_generations=num_generations,
-        generation_batch_size=generation_batch_size,
+        generation_batch_size=train_batch_size,
         per_device_train_batch_size=train_batch_size,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         max_prompt_length=max_prompt_len,
@@ -195,7 +201,7 @@ def build_trainer(
         "Generation config | num_generations=%d | generation_batch_size=%d | per_device_train_batch_size=%d | "
         "grad_accum=%d | split_batches=%s | completions_per_micro_step=%d | completions_per_update=%d",
         num_generations,
-        generation_batch_size,
+        train_batch_size,
         train_batch_size,
         GRADIENT_ACCUMULATION_STEPS,
         ACCELERATOR_CONFIG.get("split_batches"),
